@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Solana PnL Tracker",
+  "version": "1.0.0",
+  "description": "Track profit/loss for Solana wallets by comparing current balance vs 8 hours ago",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://api.mainnet-beta.solana.com/*",
+    "https://api.helius.xyz/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Solana PnL Tracker</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>SOL PnL Tracker</h1>
+      <p class="subtitle">Compare balance: Now vs 8 hours ago</p>
+    </header>
+
+    <div class="input-section">
+      <label for="addresses">Paste wallet addresses (one per line, max 20):</label>
+      <textarea
+        id="addresses"
+        placeholder="Enter Solana addresses here...&#10;Example:&#10;7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU&#10;9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
+        rows="6"
+      ></textarea>
+      <div class="button-row">
+        <button id="checkBtn" class="primary-btn">Check PnL</button>
+        <button id="clearBtn" class="secondary-btn">Clear</button>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <details>
+        <summary>Settings</summary>
+        <div class="settings-content">
+          <label for="rpcUrl">RPC Endpoint:</label>
+          <input type="text" id="rpcUrl" placeholder="https://api.mainnet-beta.solana.com">
+          <label for="heliusKey">Helius API Key (optional, for better historical data):</label>
+          <input type="text" id="heliusKey" placeholder="Your Helius API key">
+          <button id="saveSettings" class="secondary-btn">Save Settings</button>
+        </div>
+      </details>
+    </div>
+
+    <div id="loading" class="loading hidden">
+      <div class="spinner"></div>
+      <p>Fetching balances...</p>
+    </div>
+
+    <div id="results" class="results-section hidden">
+      <div class="summary">
+        <div class="summary-item">
+          <span class="label">Total Wallets:</span>
+          <span id="totalWallets" class="value">0</span>
+        </div>
+        <div class="summary-item">
+          <span class="label">Total PnL:</span>
+          <span id="totalPnl" class="value">0 SOL</span>
+        </div>
+        <div class="summary-item">
+          <span class="label">Winners/Losers:</span>
+          <span id="winLoss" class="value">0/0</span>
+        </div>
+      </div>
+
+      <div class="table-container">
+        <table id="resultsTable">
+          <thead>
+            <tr>
+              <th>Address</th>
+              <th>8h Ago</th>
+              <th>Now</th>
+              <th>PnL</th>
+            </tr>
+          </thead>
+          <tbody id="resultsBody">
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="error" class="error-section hidden">
+      <p id="errorMessage"></p>
+    </div>
+
+    <footer>
+      <p>Data from Solana RPC | Refresh for latest</p>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

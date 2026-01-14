@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Icon Generator</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    canvas { border: 1px solid #ccc; margin: 10px; }
+    .icon-container { display: flex; gap: 20px; }
+    button { margin-top: 20px; padding: 10px 20px; }
+  </style>
+</head>
+<body>
+  <h1>Solana PnL Tracker Icons</h1>
+  <p>Right-click on each canvas and "Save image as..." to save the icons.</p>
+
+  <div class="icon-container">
+    <div>
+      <h3>16x16</h3>
+      <canvas id="icon16" width="16" height="16"></canvas>
+    </div>
+    <div>
+      <h3>48x48</h3>
+      <canvas id="icon48" width="48" height="48"></canvas>
+    </div>
+    <div>
+      <h3>128x128</h3>
+      <canvas id="icon128" width="128" height="128"></canvas>
+    </div>
+  </div>
+
+  <script>
+    function drawIcon(canvas) {
+      const ctx = canvas.getContext('2d');
+      const size = canvas.width;
+      const scale = size / 128;
+
+      // Background gradient
+      const gradient = ctx.createLinearGradient(0, 0, size, size);
+      gradient.addColorStop(0, '#9945ff');
+      gradient.addColorStop(1, '#14f195');
+
+      // Draw rounded rectangle background
+      const radius = 20 * scale;
+      ctx.beginPath();
+      ctx.roundRect(0, 0, size, size, radius);
+      ctx.fillStyle = gradient;
+      ctx.fill();
+
+      // Draw SOL-like symbol (simplified)
+      ctx.strokeStyle = 'white';
+      ctx.lineWidth = 8 * scale;
+      ctx.lineCap = 'round';
+
+      // Three horizontal lines with slight angle (Solana logo inspired)
+      const padding = 28 * scale;
+      const lineSpacing = 24 * scale;
+      const offset = 6 * scale;
+
+      // Top line
+      ctx.beginPath();
+      ctx.moveTo(padding + offset, padding);
+      ctx.lineTo(size - padding, padding);
+      ctx.stroke();
+
+      // Middle line
+      ctx.beginPath();
+      ctx.moveTo(padding, size / 2);
+      ctx.lineTo(size - padding - offset, size / 2);
+      ctx.stroke();
+
+      // Bottom line
+      ctx.beginPath();
+      ctx.moveTo(padding + offset, size - padding);
+      ctx.lineTo(size - padding, size - padding);
+      ctx.stroke();
+
+      // Small arrows/chevrons
+      ctx.lineWidth = 6 * scale;
+
+      // Top right arrow
+      ctx.beginPath();
+      ctx.moveTo(size - padding - 10 * scale, padding - 8 * scale);
+      ctx.lineTo(size - padding, padding);
+      ctx.lineTo(size - padding - 10 * scale, padding + 8 * scale);
+      ctx.stroke();
+
+      // Middle left arrow
+      ctx.beginPath();
+      ctx.moveTo(padding + 10 * scale, size / 2 - 8 * scale);
+      ctx.lineTo(padding, size / 2);
+      ctx.lineTo(padding + 10 * scale, size / 2 + 8 * scale);
+      ctx.stroke();
+
+      // Bottom right arrow
+      ctx.beginPath();
+      ctx.moveTo(size - padding - 10 * scale, size - padding - 8 * scale);
+      ctx.lineTo(size - padding, size - padding);
+      ctx.lineTo(size - padding - 10 * scale, size - padding + 8 * scale);
+      ctx.stroke();
+    }
+
+    // Draw all icons
+    drawIcon(document.getElementById('icon16'));
+    drawIcon(document.getElementById('icon48'));
+    drawIcon(document.getElementById('icon128'));
+  </script>
+</body>
+</html>
