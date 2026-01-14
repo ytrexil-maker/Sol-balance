@@ -195,91 +195,100 @@ async function getBalanceChangeFromRPC(address) {
   const rpcUrl = settings.rpcUrl || DEFAULT_RPC;
   const eightHoursAgo = Math.floor(Date.now() / 1000) - EIGHT_HOURS_SEC;
 
-  // Get recent transaction signatures
-  const sigResponse = await fetch(rpcUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'getSignaturesForAddress',
-      params: [address, { limit: 100 }]
-    })
-  });
+  try {
+    // Get recent transaction signatures
+    const sigResponse = await fetch(rpcUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'getSignaturesForAddress',
+        params: [address, { limit: 50 }]
+      })
+    });
 
-  const sigResult = await sigResponse.json();
-  if (sigResult.error) {
-    throw new Error(sigResult.error.message);
-  }
+    if (!sigResponse.ok) {
+      throw new Error(`RPC error: ${sigResponse.status}`);
+    }
 
-  const signatures = sigResult.result || [];
+    const sigResult = await sigResponse.json();
+    if (sigResult.error) {
+      throw new Error(sigResult.error.message || 'RPC error');
+    }
 
-  // Filter to only transactions in the last 8 hours
-  const recentSigs = signatures.filter(sig => sig.blockTime && sig.blockTime >= eightHoursAgo);
+    const signatures = sigResult.result || [];
 
-  if (recentSigs.length === 0) {
-    return 0; // No transactions in last 8 hours
-  }
+    // Filter to only transactions in the last 8 hours
+    const recentSigs = signatures.filter(sig => sig.blockTime && sig.blockTime >= eightHoursAgo);
 
-  // Get transaction details to calculate balance changes
-  let totalChange = 0;
+    if (recentSigs.length === 0) {
+      return 0; // No transactions in last 8 hours
+    }
 
-  // Process in batches of 10 to avoid overwhelming the RPC
-  for (let i = 0; i < recentSigs.length; i += 10) {
-    const batch = recentSigs.slice(i, i + 10);
+    // Get transaction details to calculate balance changes
+    let totalChange = 0;
 
-    const txPromises = batch.map(sig =>
-      fetch(rpcUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: sig.signature,
-          method: 'getTransaction',
-          params: [sig.signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0 }]
-        })
-      }).then(r => r.json())
-    );
+    // Process in smaller batches
+    for (let i = 0; i < recentSigs.length; i += 5) {
+      const batch = recentSigs.slice(i, i + 5);
 
-    const txResults = await Promise.all(txPromises);
+      const txPromises = batch.map(sig =>
+        fetch(rpcUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: sig.signature,
+            method: 'getTransaction',
+            params: [sig.signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0 }]
+          })
+        }).then(r => r.json()).catch(() => null)
+      );
 
-    for (const txResult of txResults) {
-      if (txResult.error || !txResult.result) continue;
+      const txResults = await Promise.all(txPromises);
 
-      const tx = txResult.result;
-      const meta = tx.meta;
-      if (!meta) continue;
+      for (const txResult of txResults) {
+        if (!txResult || txResult.error || !txResult.result) continue;
 
-      // Find this address in the account keys
-      const accountKeys = tx.transaction?.message?.accountKeys || [];
-      let accountIndex = -1;
+        const tx = txResult.result;
+        const meta = tx.meta;
+        if (!meta || !meta.preBalances || !meta.postBalances) continue;
 
-      for (let j = 0; j < accountKeys.length; j++) {
-        const key = accountKeys[j];
-        const pubkey = typeof key === 'string' ? key : key.pubkey;
-        if (pubkey === address) {
-          accountIndex = j;
-          break;
+        // Find this address in the account keys (handle both legacy and v0 transactions)
+        const accountKeys = tx.transaction?.message?.accountKeys || [];
+        let accountIndex = -1;
+
+        for (let j = 0; j < accountKeys.length; j++) {
+          const key = accountKeys[j];
+          const pubkey = typeof key === 'string' ? key : (key.pubkey || '');
+          if (pubkey === address) {
+            accountIndex = j;
+            break;
+          }
         }
+
+        if (accountIndex === -1 || accountIndex >= meta.preBalances.length) continue;
+
+        // Calculate balance change for this transaction
+        const preBalance = meta.preBalances[accountIndex] || 0;
+        const postBalance = meta.postBalances[accountIndex] || 0;
+        const change = (postBalance - preBalance) / LAMPORTS_PER_SOL;
+
+        totalChange += change;
       }
 
-      if (accountIndex === -1) continue;
-
-      // Calculate balance change for this transaction
-      const preBalance = meta.preBalances?.[accountIndex] || 0;
-      const postBalance = meta.postBalances?.[accountIndex] || 0;
-      const change = (postBalance - preBalance) / LAMPORTS_PER_SOL;
-
-      totalChange += change;
+      // Delay between batches
+      if (i + 5 < recentSigs.length) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
     }
 
-    // Small delay between batches
-    if (i + 10 < recentSigs.length) {
-      await new Promise(resolve => setTimeout(resolve, 50));
-    }
+    return totalChange;
+  } catch (e) {
+    console.error('getBalanceChangeFromRPC error:', e);
+    throw e;
   }
-
-  return totalChange;
 }
 
 // Batch get current balances using JSON-RPC batch
