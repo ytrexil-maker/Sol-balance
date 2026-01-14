@@ -1,5 +1,5 @@
 // Solana PnL Tracker - Popup Script
-// Uses Solana RPC directly for historical balance calculation (no external APIs needed)
+// Uses Solana RPC directly for historical balance calculation
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const EIGHT_HOURS_SEC = 8 * 60 * 60;
@@ -134,6 +134,7 @@ async function handleCheck() {
     const results = await fetchAllBalances(addresses);
     displayResults(results);
   } catch (e) {
+    console.error('Main error:', e);
     showError(`Failed to fetch balances: ${e.message}`);
   } finally {
     loadingSection.classList.add('hidden');
@@ -147,21 +148,63 @@ function isValidSolanaAddress(address) {
   return base58Regex.test(address);
 }
 
+// Make RPC call with retry
+async function rpcCall(method, params, retries = 2) {
+  const rpcUrl = settings.rpcUrl || DEFAULT_RPC;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: Date.now(),
+          method,
+          params
+        })
+      });
+
+      if (response.status === 429) {
+        // Rate limited, wait and retry
+        if (attempt < retries) {
+          await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+          continue;
+        }
+        throw new Error('Rate limited by RPC');
+      }
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      if (data.error) {
+        throw new Error(data.error.message || 'RPC error');
+      }
+
+      return data.result;
+    } catch (e) {
+      if (attempt === retries) throw e;
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+}
+
 // Fetch balances for all addresses
 async function fetchAllBalances(addresses) {
-  // Get current balances in batch
-  const currentBalances = await batchGetBalances(addresses);
-
-  // Get historical balance changes from transactions
   const results = [];
 
   for (let i = 0; i < addresses.length; i++) {
     const address = addresses[i];
-    const currentBalance = currentBalances[i];
 
     try {
-      // Calculate net change from transaction history
-      const netChange = await getBalanceChangeFromRPC(address);
+      // Get current balance
+      const balanceResult = await rpcCall('getBalance', [address, { commitment: 'confirmed' }]);
+      const currentBalance = (balanceResult?.value || 0) / LAMPORTS_PER_SOL;
+
+      // Get balance change from transactions
+      const netChange = await getBalanceChange(address);
       const historicalBalance = currentBalance - netChange;
 
       results.push({
@@ -171,7 +214,17 @@ async function fetchAllBalances(addresses) {
         pnl: netChange
       });
     } catch (e) {
-      console.error(`Failed to get history for ${address}:`, e);
+      console.error(`Error for ${address}:`, e);
+
+      // Try to at least get current balance
+      let currentBalance = 0;
+      try {
+        const balanceResult = await rpcCall('getBalance', [address, { commitment: 'confirmed' }]);
+        currentBalance = (balanceResult?.value || 0) / LAMPORTS_PER_SOL;
+      } catch (e2) {
+        console.error('Balance fetch also failed:', e2);
+      }
+
       results.push({
         address,
         currentBalance,
@@ -181,176 +234,76 @@ async function fetchAllBalances(addresses) {
       });
     }
 
-    // Small delay between addresses
+    // Delay between addresses to avoid rate limits
     if (i < addresses.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise(r => setTimeout(r, 200));
     }
   }
 
   return results;
 }
 
-// Get balance change from Solana RPC transaction history
-async function getBalanceChangeFromRPC(address) {
-  const rpcUrl = settings.rpcUrl || DEFAULT_RPC;
+// Get balance change from transaction history
+async function getBalanceChange(address) {
   const eightHoursAgo = Math.floor(Date.now() / 1000) - EIGHT_HOURS_SEC;
 
-  try {
-    // Get recent transaction signatures
-    const sigResponse = await fetch(rpcUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'getSignaturesForAddress',
-        params: [address, { limit: 50 }]
-      })
-    });
+  // Get recent signatures
+  const signatures = await rpcCall('getSignaturesForAddress', [address, { limit: 30 }]);
 
-    if (!sigResponse.ok) {
-      throw new Error(`RPC error: ${sigResponse.status}`);
-    }
-
-    const sigResult = await sigResponse.json();
-    if (sigResult.error) {
-      throw new Error(sigResult.error.message || 'RPC error');
-    }
-
-    const signatures = sigResult.result || [];
-
-    // Filter to only transactions in the last 8 hours
-    const recentSigs = signatures.filter(sig => sig.blockTime && sig.blockTime >= eightHoursAgo);
-
-    if (recentSigs.length === 0) {
-      return 0; // No transactions in last 8 hours
-    }
-
-    // Get transaction details to calculate balance changes
-    let totalChange = 0;
-
-    // Process in smaller batches
-    for (let i = 0; i < recentSigs.length; i += 5) {
-      const batch = recentSigs.slice(i, i + 5);
-
-      const txPromises = batch.map(sig =>
-        fetch(rpcUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: sig.signature,
-            method: 'getTransaction',
-            params: [sig.signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0 }]
-          })
-        }).then(r => r.json()).catch(() => null)
-      );
-
-      const txResults = await Promise.all(txPromises);
-
-      for (const txResult of txResults) {
-        if (!txResult || txResult.error || !txResult.result) continue;
-
-        const tx = txResult.result;
-        const meta = tx.meta;
-        if (!meta || !meta.preBalances || !meta.postBalances) continue;
-
-        // Find this address in the account keys (handle both legacy and v0 transactions)
-        const accountKeys = tx.transaction?.message?.accountKeys || [];
-        let accountIndex = -1;
-
-        for (let j = 0; j < accountKeys.length; j++) {
-          const key = accountKeys[j];
-          const pubkey = typeof key === 'string' ? key : (key.pubkey || '');
-          if (pubkey === address) {
-            accountIndex = j;
-            break;
-          }
-        }
-
-        if (accountIndex === -1 || accountIndex >= meta.preBalances.length) continue;
-
-        // Calculate balance change for this transaction
-        const preBalance = meta.preBalances[accountIndex] || 0;
-        const postBalance = meta.postBalances[accountIndex] || 0;
-        const change = (postBalance - preBalance) / LAMPORTS_PER_SOL;
-
-        totalChange += change;
-      }
-
-      // Delay between batches
-      if (i + 5 < recentSigs.length) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-    }
-
-    return totalChange;
-  } catch (e) {
-    console.error('getBalanceChangeFromRPC error:', e);
-    throw e;
-  }
-}
-
-// Batch get current balances using JSON-RPC batch
-async function batchGetBalances(addresses) {
-  const rpcUrl = settings.rpcUrl || DEFAULT_RPC;
-
-  const batchRequest = addresses.map((address, index) => ({
-    jsonrpc: '2.0',
-    id: index,
-    method: 'getBalance',
-    params: [address, { commitment: 'confirmed' }]
-  }));
-
-  try {
-    const response = await fetch(rpcUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(batchRequest)
-    });
-
-    if (!response.ok) {
-      throw new Error(`RPC request failed: ${response.status}`);
-    }
-
-    const results = await response.json();
-    const sorted = Array.isArray(results) ? results.sort((a, b) => a.id - b.id) : [results];
-
-    return sorted.map(r => {
-      if (r.error) {
-        console.warn('RPC error for address:', r.error);
-        return 0;
-      }
-      return (r.result?.value || 0) / LAMPORTS_PER_SOL;
-    });
-  } catch (e) {
-    console.error('Batch balance fetch failed:', e);
-    return Promise.all(addresses.map(addr => getSingleBalance(addr)));
-  }
-}
-
-// Get single balance (fallback)
-async function getSingleBalance(address) {
-  const rpcUrl = settings.rpcUrl || DEFAULT_RPC;
-
-  try {
-    const response = await fetch(rpcUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'getBalance',
-        params: [address, { commitment: 'confirmed' }]
-      })
-    });
-
-    const result = await response.json();
-    return (result.result?.value || 0) / LAMPORTS_PER_SOL;
-  } catch (e) {
-    console.error('Failed to get balance for', address, e);
+  if (!signatures || signatures.length === 0) {
     return 0;
   }
+
+  // Filter to last 8 hours
+  const recentSigs = signatures.filter(s => s.blockTime && s.blockTime >= eightHoursAgo);
+
+  if (recentSigs.length === 0) {
+    return 0;
+  }
+
+  // Get transactions one at a time with delays to avoid rate limits
+  let totalChange = 0;
+
+  for (let i = 0; i < Math.min(recentSigs.length, 20); i++) {
+    const sig = recentSigs[i];
+
+    try {
+      const tx = await rpcCall('getTransaction', [
+        sig.signature,
+        { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0 }
+      ]);
+
+      if (!tx || !tx.meta) continue;
+
+      // Find address index
+      const accountKeys = tx.transaction?.message?.accountKeys || [];
+      let idx = -1;
+      for (let j = 0; j < accountKeys.length; j++) {
+        const key = accountKeys[j];
+        const pubkey = typeof key === 'string' ? key : key.pubkey;
+        if (pubkey === address) {
+          idx = j;
+          break;
+        }
+      }
+
+      if (idx >= 0 && idx < tx.meta.preBalances.length) {
+        const pre = tx.meta.preBalances[idx] || 0;
+        const post = tx.meta.postBalances[idx] || 0;
+        totalChange += (post - pre) / LAMPORTS_PER_SOL;
+      }
+    } catch (e) {
+      console.warn(`Failed to get tx ${sig.signature}:`, e.message);
+      // Continue with other transactions
+    }
+
+    // Small delay between transaction fetches
+    if (i < recentSigs.length - 1) {
+      await new Promise(r => setTimeout(r, 150));
+    }
+  }
+
+  return totalChange;
 }
 
 // Display results in table
@@ -360,7 +313,6 @@ function displayResults(results) {
   let totalPnl = 0;
   let winners = 0;
   let losers = 0;
-  let validPnlCount = 0;
   let errorCount = 0;
 
   for (const result of results) {
@@ -376,9 +328,9 @@ function displayResults(results) {
     if (result.historicalBalance !== null) {
       histCell.textContent = formatBalance(result.historicalBalance);
     } else {
-      histCell.textContent = result.error ? 'Error' : 'N/A';
+      histCell.textContent = 'Error';
       histCell.style.color = '#ff6b6b';
-      histCell.title = result.error || '';
+      histCell.title = result.error || 'Failed to fetch';
     }
 
     const currCell = document.createElement('td');
@@ -390,7 +342,6 @@ function displayResults(results) {
       pnlCell.textContent = formatPnl(result.pnl);
       pnlCell.className = getPnlClass(result.pnl);
       totalPnl += result.pnl;
-      validPnlCount++;
 
       if (result.pnl > 0.0001) winners++;
       else if (result.pnl < -0.0001) losers++;
@@ -414,10 +365,8 @@ function displayResults(results) {
 
   resultsSection.classList.remove('hidden');
 
-  if (errorCount > 0 && errorCount < results.length) {
-    showError(`${errorCount} address(es) failed to fetch.`);
-  } else if (errorCount === results.length) {
-    showError('Failed to fetch historical data.');
+  if (errorCount > 0) {
+    showError(`${errorCount}/${results.length} failed. RPC may be rate-limiting. Try fewer addresses or wait a bit.`);
   }
 }
 
@@ -428,7 +377,7 @@ function shortenAddress(address) {
 
 function formatBalance(balance) {
   if (balance === 0) return '0';
-  if (balance < 0) return formatBalance(Math.abs(balance)) + ' (neg)';
+  if (balance < 0) return '-' + formatBalance(Math.abs(balance));
   if (balance < 0.0001) return '<0.0001';
   if (balance < 1) return balance.toFixed(4);
   if (balance < 100) return balance.toFixed(3);
