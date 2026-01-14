@@ -1,11 +1,12 @@
 // Solana PnL Tracker - Popup Script
-// Uses Solscan Public API (free, no API key required)
+// Uses Solscan Pro API for historical balance data
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
-const EIGHT_HOURS_MS = 8 * 60 * 60 * 1000;
 const EIGHT_HOURS_SEC = 8 * 60 * 60;
 const DEFAULT_RPC = 'https://api.mainnet-beta.solana.com';
-const SOLSCAN_PUBLIC_API = 'https://public-api.solscan.io';
+const SOLSCAN_PRO_API = 'https://pro-api.solscan.io/v2.0';
+const SOLSCAN_API_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjcmVhdGVkQXQiOjE3NjgzNTExMDkzMjcsImVtYWlsIjoieXRyZXhpbEBnbWFpbC5jb20iLCJhY3Rpb24iOiJ0b2tlbi1hcGkiLCJhcGlWZXJzaW9uIjoidjIiLCJpYXQiOjE3NjgzNTExMDl9.IoaPAtxGjrxypM7zuyd0piTI1o8fGTALvMbxiikWfTg';
+const SOL_TOKEN = 'So11111111111111111111111111111111111111111';
 const MAX_ADDRESSES = 20;
 
 // DOM Elements
@@ -155,7 +156,7 @@ async function fetchAllBalances(addresses) {
   // Get current balances in batch
   const currentBalances = await batchGetBalances(addresses);
 
-  // Get historical data from Solscan for each address (with small delay to avoid rate limits)
+  // Get historical data from Solscan for each address
   const results = [];
 
   for (let i = 0; i < addresses.length; i++) {
@@ -163,7 +164,7 @@ async function fetchAllBalances(addresses) {
     const currentBalance = currentBalances[i];
 
     try {
-      // Get SOL transfers from last 8 hours from Solscan
+      // Get SOL transfers from last 8 hours from Solscan Pro API
       const netChange = await getSolscanNetChange(address);
 
       // Historical balance = current balance - net change over 8 hours
@@ -186,75 +187,70 @@ async function fetchAllBalances(addresses) {
       });
     }
 
-    // Small delay between requests to avoid rate limiting (100ms)
+    // Small delay between requests (50ms)
     if (i < addresses.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise(resolve => setTimeout(resolve, 50));
     }
   }
 
   return results;
 }
 
-// Get net SOL change from Solscan Public API over the last 8 hours
+// Get net SOL change from Solscan Pro API over the last 8 hours
 async function getSolscanNetChange(address) {
   const now = Math.floor(Date.now() / 1000);
   const eightHoursAgo = now - EIGHT_HOURS_SEC;
 
   let allTransfers = [];
-  let offset = 0;
-  const limit = 50;
+  let page = 1;
+  const pageSize = 100;
   let hasMore = true;
 
-  // Paginate through transfers
+  // Paginate through all transfers in the time range
   while (hasMore) {
-    const url = `${SOLSCAN_PUBLIC_API}/account/solTransfers?account=${address}&limit=${limit}&offset=${offset}`;
+    const url = new URL(`${SOLSCAN_PRO_API}/account/transfer`);
+    url.searchParams.set('address', address);
+    url.searchParams.set('token', SOL_TOKEN);
+    url.searchParams.set('from_time', eightHoursAgo.toString());
+    url.searchParams.set('to_time', now.toString());
+    url.searchParams.set('page', page.toString());
+    url.searchParams.set('page_size', pageSize.toString());
 
-    const response = await fetch(url, {
+    const response = await fetch(url.toString(), {
       method: 'GET',
       headers: {
-        'Accept': 'application/json'
+        'token': SOLSCAN_API_KEY,
+        'Content-Type': 'application/json'
       }
     });
 
     if (!response.ok) {
-      if (response.status === 429) {
-        throw new Error('Rate limited - wait a moment and try again');
+      if (response.status === 401) {
+        throw new Error('API key invalid');
+      } else if (response.status === 429) {
+        throw new Error('Rate limited - try again later');
       }
       throw new Error(`Solscan API error: ${response.status}`);
     }
 
     const data = await response.json();
 
-    // Handle different response formats
-    const transfers = Array.isArray(data) ? data : (data.data || []);
+    if (!data.success) {
+      throw new Error(data.message || 'Solscan API returned error');
+    }
 
-    if (transfers.length === 0) {
+    const transfers = data.data || [];
+    allTransfers = allTransfers.concat(transfers);
+
+    // Check if there are more pages
+    if (transfers.length < pageSize) {
       hasMore = false;
-      break;
-    }
-
-    // Filter transfers within the last 8 hours
-    for (const transfer of transfers) {
-      const blockTime = transfer.blockTime || transfer.block_time || 0;
-
-      if (blockTime >= eightHoursAgo) {
-        allTransfers.push(transfer);
-      } else {
-        // Transfers are sorted by time desc, so we can stop when we hit old ones
-        hasMore = false;
-        break;
-      }
-    }
-
-    // Check if we should continue paginating
-    if (hasMore && transfers.length === limit) {
-      offset += limit;
-      // Safety limit
-      if (offset > 500) {
-        hasMore = false;
-      }
     } else {
-      hasMore = false;
+      page++;
+      // Safety limit
+      if (page > 10) {
+        hasMore = false;
+      }
     }
   }
 
@@ -262,17 +258,11 @@ async function getSolscanNetChange(address) {
   let netChange = 0;
 
   for (const transfer of allTransfers) {
-    // Amount is in lamports
-    const amount = (transfer.lamport || transfer.amount || 0) / LAMPORTS_PER_SOL;
-    const src = transfer.src || transfer.source || transfer.from_address || '';
-    const dst = transfer.dst || transfer.destination || transfer.to_address || '';
+    const amount = (transfer.amount || 0) / LAMPORTS_PER_SOL;
 
-    // Determine if this is incoming or outgoing
-    if (dst.toLowerCase() === address.toLowerCase()) {
-      // Incoming transfer
+    if (transfer.flow === 'in') {
       netChange += amount;
-    } else if (src.toLowerCase() === address.toLowerCase()) {
-      // Outgoing transfer
+    } else if (transfer.flow === 'out') {
       netChange -= amount;
     }
   }
@@ -415,9 +405,9 @@ function displayResults(results) {
 
   // Show error note if some failed
   if (errorCount > 0 && errorCount < results.length) {
-    showError(`${errorCount} address(es) failed. May be rate limited - try fewer addresses.`);
+    showError(`${errorCount} address(es) failed to fetch.`);
   } else if (errorCount === results.length) {
-    showError('Failed to fetch data. The free API may be rate limited - try again in a minute.');
+    showError('Failed to fetch historical data. Try again in a moment.');
   }
 }
 
