@@ -8,7 +8,9 @@
   ],
   "host_permissions": [
     "https://api.mainnet-beta.solana.com/*",
-    "https://*.solana.com/*"
+    "https://*.solana.com/*",
+    "https://*.alchemy.com/*",
+    "https://*.ankr.com/*"
   ],
   "action": {
     "default_popup": "popup.html",
