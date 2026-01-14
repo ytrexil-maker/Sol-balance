@@ -30,11 +30,9 @@
       <details>
         <summary>Settings</summary>
         <div class="settings-content">
-          <label for="rpcUrl">RPC Endpoint:</label>
+          <label for="rpcUrl">RPC Endpoint (optional):</label>
           <input type="text" id="rpcUrl" placeholder="https://api.mainnet-beta.solana.com">
-          <label for="solscanKey">Solscan Pro API Key (required):</label>
-          <input type="text" id="solscanKey" placeholder="Get key at solscan.io/apis">
-          <p class="settings-note">Required to fetch historical balance data</p>
+          <p class="settings-note">Leave blank to use default Solana RPC</p>
           <button id="saveSettings" class="secondary-btn">Save Settings</button>
         </div>
       </details>
@@ -82,7 +80,7 @@
     </div>
 
     <footer>
-      <p>Data from Solscan Pro API | Refresh for latest</p>
+      <p>Data from Solscan Public API | No API key required</p>
     </footer>
   </div>
 

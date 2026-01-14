@@ -1,12 +1,11 @@
 // Solana PnL Tracker - Popup Script
-// Uses Solscan Pro API to get historical balance data
+// Uses Solscan Public API (free, no API key required)
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const EIGHT_HOURS_MS = 8 * 60 * 60 * 1000;
 const EIGHT_HOURS_SEC = 8 * 60 * 60;
 const DEFAULT_RPC = 'https://api.mainnet-beta.solana.com';
-const SOLSCAN_API_BASE = 'https://pro-api.solscan.io/v2.0';
-const SOL_TOKEN = 'So11111111111111111111111111111111111111111';
+const SOLSCAN_PUBLIC_API = 'https://public-api.solscan.io';
 const MAX_ADDRESSES = 20;
 
 // DOM Elements
@@ -14,7 +13,6 @@ const addressesInput = document.getElementById('addresses');
 const checkBtn = document.getElementById('checkBtn');
 const clearBtn = document.getElementById('clearBtn');
 const rpcUrlInput = document.getElementById('rpcUrl');
-const solscanKeyInput = document.getElementById('solscanKey');
 const saveSettingsBtn = document.getElementById('saveSettings');
 const loadingSection = document.getElementById('loading');
 const resultsSection = document.getElementById('results');
@@ -27,8 +25,7 @@ const winLossSpan = document.getElementById('winLoss');
 
 // State
 let settings = {
-  rpcUrl: DEFAULT_RPC,
-  solscanKey: ''
+  rpcUrl: DEFAULT_RPC
 };
 
 // Initialize
@@ -49,7 +46,6 @@ async function loadSettings() {
     if (stored.settings) {
       settings = { ...settings, ...stored.settings };
       rpcUrlInput.value = settings.rpcUrl || '';
-      solscanKeyInput.value = settings.solscanKey || '';
     }
   } catch (e) {
     console.error('Failed to load settings:', e);
@@ -71,7 +67,6 @@ async function loadSavedAddresses() {
 // Save settings
 async function handleSaveSettings() {
   settings.rpcUrl = rpcUrlInput.value.trim() || DEFAULT_RPC;
-  settings.solscanKey = solscanKeyInput.value.trim();
 
   try {
     await chrome.storage.local.set({ settings });
@@ -94,12 +89,6 @@ function handleClear() {
 
 // Main check function
 async function handleCheck() {
-  // Check for API key first
-  if (!settings.solscanKey) {
-    showError('Solscan Pro API key required. Get one at solscan.io/apis and add it in Settings.');
-    return;
-  }
-
   const addressText = addressesInput.value.trim();
   if (!addressText) {
     showError('Please enter at least one Solana address');
@@ -166,110 +155,124 @@ async function fetchAllBalances(addresses) {
   // Get current balances in batch
   const currentBalances = await batchGetBalances(addresses);
 
-  // Get historical data from Solscan for each address
-  const results = await Promise.all(
-    addresses.map(async (address, index) => {
-      const currentBalance = currentBalances[index];
+  // Get historical data from Solscan for each address (with small delay to avoid rate limits)
+  const results = [];
 
-      try {
-        // Get SOL transfers from last 8 hours from Solscan
-        const netChange = await getSolscanNetChange(address);
+  for (let i = 0; i < addresses.length; i++) {
+    const address = addresses[i];
+    const currentBalance = currentBalances[i];
 
-        // Historical balance = current balance - net change over 8 hours
-        // If net change is +5 SOL (received 5), then 8h ago was current - 5
-        // If net change is -3 SOL (sent 3), then 8h ago was current + 3
-        const historicalBalance = currentBalance - netChange;
+    try {
+      // Get SOL transfers from last 8 hours from Solscan
+      const netChange = await getSolscanNetChange(address);
 
-        return {
-          address,
-          currentBalance,
-          historicalBalance,
-          pnl: netChange // PnL is the net change
-        };
-      } catch (e) {
-        console.error(`Failed to get history for ${address}:`, e);
-        return {
-          address,
-          currentBalance,
-          historicalBalance: null,
-          pnl: null,
-          error: e.message
-        };
-      }
-    })
-  );
+      // Historical balance = current balance - net change over 8 hours
+      const historicalBalance = currentBalance - netChange;
+
+      results.push({
+        address,
+        currentBalance,
+        historicalBalance,
+        pnl: netChange
+      });
+    } catch (e) {
+      console.error(`Failed to get history for ${address}:`, e);
+      results.push({
+        address,
+        currentBalance,
+        historicalBalance: null,
+        pnl: null,
+        error: e.message
+      });
+    }
+
+    // Small delay between requests to avoid rate limiting (100ms)
+    if (i < addresses.length - 1) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
 
   return results;
 }
 
-// Get net SOL change from Solscan API over the last 8 hours
+// Get net SOL change from Solscan Public API over the last 8 hours
 async function getSolscanNetChange(address) {
   const now = Math.floor(Date.now() / 1000);
   const eightHoursAgo = now - EIGHT_HOURS_SEC;
 
   let allTransfers = [];
-  let page = 1;
-  const pageSize = 100;
+  let offset = 0;
+  const limit = 50;
   let hasMore = true;
 
-  // Paginate through all transfers in the time range
+  // Paginate through transfers
   while (hasMore) {
-    const url = new URL(`${SOLSCAN_API_BASE}/account/transfer`);
-    url.searchParams.set('address', address);
-    url.searchParams.set('token', SOL_TOKEN);
-    url.searchParams.set('from_time', eightHoursAgo.toString());
-    url.searchParams.set('to_time', now.toString());
-    url.searchParams.set('page', page.toString());
-    url.searchParams.set('page_size', pageSize.toString());
+    const url = `${SOLSCAN_PUBLIC_API}/account/solTransfers?account=${address}&limit=${limit}&offset=${offset}`;
 
-    const response = await fetch(url.toString(), {
+    const response = await fetch(url, {
       method: 'GET',
       headers: {
-        'token': settings.solscanKey,
-        'Content-Type': 'application/json'
+        'Accept': 'application/json'
       }
     });
 
     if (!response.ok) {
-      if (response.status === 401) {
-        throw new Error('Invalid Solscan API key');
-      } else if (response.status === 429) {
-        throw new Error('Rate limited - try again later');
+      if (response.status === 429) {
+        throw new Error('Rate limited - wait a moment and try again');
       }
       throw new Error(`Solscan API error: ${response.status}`);
     }
 
     const data = await response.json();
 
-    if (!data.success) {
-      throw new Error(data.message || 'Solscan API returned error');
+    // Handle different response formats
+    const transfers = Array.isArray(data) ? data : (data.data || []);
+
+    if (transfers.length === 0) {
+      hasMore = false;
+      break;
     }
 
-    const transfers = data.data || [];
-    allTransfers = allTransfers.concat(transfers);
+    // Filter transfers within the last 8 hours
+    for (const transfer of transfers) {
+      const blockTime = transfer.blockTime || transfer.block_time || 0;
 
-    // Check if there are more pages
-    if (transfers.length < pageSize) {
-      hasMore = false;
-    } else {
-      page++;
-      // Safety limit to prevent infinite loops
-      if (page > 10) {
+      if (blockTime >= eightHoursAgo) {
+        allTransfers.push(transfer);
+      } else {
+        // Transfers are sorted by time desc, so we can stop when we hit old ones
+        hasMore = false;
+        break;
+      }
+    }
+
+    // Check if we should continue paginating
+    if (hasMore && transfers.length === limit) {
+      offset += limit;
+      // Safety limit
+      if (offset > 500) {
         hasMore = false;
       }
+    } else {
+      hasMore = false;
     }
   }
 
   // Calculate net change
-  // flow: "in" means received, "out" means sent
   let netChange = 0;
 
   for (const transfer of allTransfers) {
-    const amount = (transfer.amount || 0) / LAMPORTS_PER_SOL;
+    // Amount is in lamports
+    const amount = (transfer.lamport || transfer.amount || 0) / LAMPORTS_PER_SOL;
+    const src = transfer.src || transfer.source || transfer.from_address || '';
+    const dst = transfer.dst || transfer.destination || transfer.to_address || '';
 
-    if (transfer.flow === 'in') {
+    // Determine if this is incoming or outgoing
+    if (dst.toLowerCase() === address.toLowerCase()) {
+      // Incoming transfer
       netChange += amount;
-    } else if (transfer.flow === 'out') {
+    } else if (src.toLowerCase() === address.toLowerCase()) {
+      // Outgoing transfer
       netChange -= amount;
     }
   }
@@ -412,9 +415,9 @@ function displayResults(results) {
 
   // Show error note if some failed
   if (errorCount > 0 && errorCount < results.length) {
-    showError(`${errorCount} address(es) failed to fetch historical data. Check the API key or try again.`);
+    showError(`${errorCount} address(es) failed. May be rate limited - try fewer addresses.`);
   } else if (errorCount === results.length) {
-    showError('Failed to fetch historical data for all addresses. Check your Solscan API key.');
+    showError('Failed to fetch data. The free API may be rate limited - try again in a minute.');
   }
 }
 

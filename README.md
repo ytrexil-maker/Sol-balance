@@ -1,21 +1,17 @@
 # Solana PnL Tracker - Edge Extension
 
-A Microsoft Edge browser extension that tracks profit/loss for Solana wallets by comparing current balance vs 8 hours ago using the Solscan Pro API.
+A Microsoft Edge browser extension that tracks profit/loss for Solana wallets by comparing current balance vs 8 hours ago.
+
+**No API key required** - Uses free Solscan public API.
 
 ## Features
 
 - Paste up to 20 Solana wallet addresses
 - View current SOL balance for each wallet
-- Compare against balance from 8 hours ago (via Solscan API)
+- Compare against balance from 8 hours ago
 - See profit/loss in SOL
 - Summary stats: total wallets, total PnL, winners/losers count
-- Real-time historical data from Solscan Pro API
-
-## Requirements
-
-**Solscan Pro API Key** - Required to fetch historical balance data.
-- Get your API key at [solscan.io/apis](https://solscan.io/apis)
-- Free tier available with rate limits
+- No API key or signup required
 
 ## Installation
 
@@ -27,13 +23,6 @@ A Microsoft Edge browser extension that tracks profit/loss for Solana wallets by
 4. Click **Load unpacked**
 5. Select the folder containing this extension
 6. The extension icon should appear in your toolbar
-
-## Setup
-
-1. Click the extension icon
-2. Expand **Settings**
-3. Enter your Solscan Pro API key
-4. Click **Save Settings**
 
 ## Usage
 
@@ -49,7 +38,7 @@ A Microsoft Edge browser extension that tracks profit/loss for Solana wallets by
 ## How It Works
 
 1. **Current Balance**: Fetched in real-time from Solana RPC
-2. **Historical Balance**: Calculated using Solscan Pro API's transfer endpoint:
+2. **Historical Balance**: Calculated using Solscan's free public API:
    - Fetches all SOL transfers from the last 8 hours
    - Calculates net change (inflows - outflows)
    - Historical balance = Current balance - Net change
@@ -58,17 +47,17 @@ A Microsoft Edge browser extension that tracks profit/loss for Solana wallets by
 ## Technical Details
 
 - Built with Manifest V3 for Edge compatibility
-- Uses Solscan Pro API for historical transfer data
+- Uses free Solscan public API (`public-api.solscan.io`)
 - Uses batch RPC calls for efficient current balance fetching
-- Paginates through Solscan API results automatically
-- Settings stored locally via chrome.storage
+- Includes rate limit handling with delays between requests
+- No API key required
 
 ## Files
 
 ```
 ├── manifest.json      # Extension configuration
 ├── popup.html         # Main UI
-├── popup.js           # Core logic (Solscan API integration)
+├── popup.js           # Core logic
 ├── styles.css         # Styling
 ├── background.js      # Background service worker
 └── icons/             # Extension icons
@@ -80,20 +69,20 @@ A Microsoft Edge browser extension that tracks profit/loss for Solana wallets by
 ## API Endpoints Used
 
 - **Solana RPC**: `getBalance` for current SOL balance
-- **Solscan Pro API**: `/v2.0/account/transfer` for SOL transfer history
+- **Solscan Public API**: `/account/solTransfers` for SOL transfer history
 
 ## Permissions
 
-- `storage`: To save API key and settings locally
+- `storage`: To save settings and last-used addresses locally
 - `https://api.mainnet-beta.solana.com/*`: To fetch current SOL balances
-- `https://pro-api.solscan.io/*`: To fetch historical transfer data
+- `https://public-api.solscan.io/*`: To fetch historical transfer data
 
 ## Rate Limits
 
-Solscan Pro API has rate limits based on your plan. If you hit rate limits:
+The free Solscan public API has rate limits. If you encounter errors:
 - Reduce the number of addresses per check
-- Wait between checks
-- Consider upgrading your Solscan API plan
+- Wait a minute between checks
+- The extension adds small delays between requests to help avoid limits
 
 ## License
 
