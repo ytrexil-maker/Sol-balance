@@ -1,12 +1,9 @@
 // Solana PnL Tracker - Popup Script
-// Uses Solscan Pro API for historical balance data
+// Uses Solana RPC directly for historical balance calculation (no external APIs needed)
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const EIGHT_HOURS_SEC = 8 * 60 * 60;
 const DEFAULT_RPC = 'https://api.mainnet-beta.solana.com';
-const SOLSCAN_PRO_API = 'https://pro-api.solscan.io/v2.0';
-const SOLSCAN_API_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjcmVhdGVkQXQiOjE3NjgzNTExMDkzMjcsImVtYWlsIjoieXRyZXhpbEBnbWFpbC5jb20iLCJhY3Rpb24iOiJ0b2tlbi1hcGkiLCJhcGlWZXJzaW9uIjoidjIiLCJpYXQiOjE3NjgzNTExMDl9.IoaPAtxGjrxypM7zuyd0piTI1o8fGTALvMbxiikWfTg';
-const SOL_TOKEN = 'So11111111111111111111111111111111111111111';
 const MAX_ADDRESSES = 20;
 
 // DOM Elements
@@ -146,7 +143,6 @@ async function handleCheck() {
 
 // Validate Solana address format
 function isValidSolanaAddress(address) {
-  // Base58 characters (no 0, O, I, l)
   const base58Regex = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
   return base58Regex.test(address);
 }
@@ -156,7 +152,7 @@ async function fetchAllBalances(addresses) {
   // Get current balances in batch
   const currentBalances = await batchGetBalances(addresses);
 
-  // Get historical data from Solscan for each address
+  // Get historical balance changes from transactions
   const results = [];
 
   for (let i = 0; i < addresses.length; i++) {
@@ -164,10 +160,8 @@ async function fetchAllBalances(addresses) {
     const currentBalance = currentBalances[i];
 
     try {
-      // Get SOL transfers from last 8 hours from Solscan Pro API
-      const netChange = await getSolscanNetChange(address);
-
-      // Historical balance = current balance - net change over 8 hours
+      // Calculate net change from transaction history
+      const netChange = await getBalanceChangeFromRPC(address);
       const historicalBalance = currentBalance - netChange;
 
       results.push({
@@ -187,94 +181,111 @@ async function fetchAllBalances(addresses) {
       });
     }
 
-    // Small delay between requests (50ms)
+    // Small delay between addresses
     if (i < addresses.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
 
   return results;
 }
 
-// Get net SOL change from Solscan Pro API over the last 8 hours
-async function getSolscanNetChange(address) {
-  const now = Math.floor(Date.now() / 1000);
-  const eightHoursAgo = now - EIGHT_HOURS_SEC;
+// Get balance change from Solana RPC transaction history
+async function getBalanceChangeFromRPC(address) {
+  const rpcUrl = settings.rpcUrl || DEFAULT_RPC;
+  const eightHoursAgo = Math.floor(Date.now() / 1000) - EIGHT_HOURS_SEC;
 
-  let allTransfers = [];
-  let page = 1;
-  const pageSize = 100;
-  let hasMore = true;
+  // Get recent transaction signatures
+  const sigResponse = await fetch(rpcUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'getSignaturesForAddress',
+      params: [address, { limit: 100 }]
+    })
+  });
 
-  // Paginate through all transfers in the time range
-  while (hasMore) {
-    const url = new URL(`${SOLSCAN_PRO_API}/account/transfer`);
-    url.searchParams.set('address', address);
-    url.searchParams.set('token', SOL_TOKEN);
-    url.searchParams.set('from_time', eightHoursAgo.toString());
-    url.searchParams.set('to_time', now.toString());
-    url.searchParams.set('page', page.toString());
-    url.searchParams.set('page_size', pageSize.toString());
+  const sigResult = await sigResponse.json();
+  if (sigResult.error) {
+    throw new Error(sigResult.error.message);
+  }
 
-    const response = await fetch(url.toString(), {
-      method: 'GET',
-      headers: {
-        'token': SOLSCAN_API_KEY,
-        'Content-Type': 'application/json'
+  const signatures = sigResult.result || [];
+
+  // Filter to only transactions in the last 8 hours
+  const recentSigs = signatures.filter(sig => sig.blockTime && sig.blockTime >= eightHoursAgo);
+
+  if (recentSigs.length === 0) {
+    return 0; // No transactions in last 8 hours
+  }
+
+  // Get transaction details to calculate balance changes
+  let totalChange = 0;
+
+  // Process in batches of 10 to avoid overwhelming the RPC
+  for (let i = 0; i < recentSigs.length; i += 10) {
+    const batch = recentSigs.slice(i, i + 10);
+
+    const txPromises = batch.map(sig =>
+      fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: sig.signature,
+          method: 'getTransaction',
+          params: [sig.signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0 }]
+        })
+      }).then(r => r.json())
+    );
+
+    const txResults = await Promise.all(txPromises);
+
+    for (const txResult of txResults) {
+      if (txResult.error || !txResult.result) continue;
+
+      const tx = txResult.result;
+      const meta = tx.meta;
+      if (!meta) continue;
+
+      // Find this address in the account keys
+      const accountKeys = tx.transaction?.message?.accountKeys || [];
+      let accountIndex = -1;
+
+      for (let j = 0; j < accountKeys.length; j++) {
+        const key = accountKeys[j];
+        const pubkey = typeof key === 'string' ? key : key.pubkey;
+        if (pubkey === address) {
+          accountIndex = j;
+          break;
+        }
       }
-    });
 
-    if (!response.ok) {
-      if (response.status === 401) {
-        throw new Error('API key invalid');
-      } else if (response.status === 429) {
-        throw new Error('Rate limited - try again later');
-      }
-      throw new Error(`Solscan API error: ${response.status}`);
+      if (accountIndex === -1) continue;
+
+      // Calculate balance change for this transaction
+      const preBalance = meta.preBalances?.[accountIndex] || 0;
+      const postBalance = meta.postBalances?.[accountIndex] || 0;
+      const change = (postBalance - preBalance) / LAMPORTS_PER_SOL;
+
+      totalChange += change;
     }
 
-    const data = await response.json();
-
-    if (!data.success) {
-      throw new Error(data.message || 'Solscan API returned error');
-    }
-
-    const transfers = data.data || [];
-    allTransfers = allTransfers.concat(transfers);
-
-    // Check if there are more pages
-    if (transfers.length < pageSize) {
-      hasMore = false;
-    } else {
-      page++;
-      // Safety limit
-      if (page > 10) {
-        hasMore = false;
-      }
+    // Small delay between batches
+    if (i + 10 < recentSigs.length) {
+      await new Promise(resolve => setTimeout(resolve, 50));
     }
   }
 
-  // Calculate net change
-  let netChange = 0;
-
-  for (const transfer of allTransfers) {
-    const amount = (transfer.amount || 0) / LAMPORTS_PER_SOL;
-
-    if (transfer.flow === 'in') {
-      netChange += amount;
-    } else if (transfer.flow === 'out') {
-      netChange -= amount;
-    }
-  }
-
-  return netChange;
+  return totalChange;
 }
 
 // Batch get current balances using JSON-RPC batch
 async function batchGetBalances(addresses) {
   const rpcUrl = settings.rpcUrl || DEFAULT_RPC;
 
-  // Create batch request
   const batchRequest = addresses.map((address, index) => ({
     jsonrpc: '2.0',
     id: index,
@@ -294,8 +305,6 @@ async function batchGetBalances(addresses) {
     }
 
     const results = await response.json();
-
-    // Sort by id and extract balances
     const sorted = Array.isArray(results) ? results.sort((a, b) => a.id - b.id) : [results];
 
     return sorted.map(r => {
@@ -307,7 +316,6 @@ async function batchGetBalances(addresses) {
     });
   } catch (e) {
     console.error('Batch balance fetch failed:', e);
-    // Fallback to individual requests
     return Promise.all(addresses.map(addr => getSingleBalance(addr)));
   }
 }
@@ -349,13 +357,11 @@ function displayResults(results) {
   for (const result of results) {
     const row = document.createElement('tr');
 
-    // Address cell
     const addrCell = document.createElement('td');
     addrCell.className = 'address-cell';
     addrCell.textContent = shortenAddress(result.address);
     addrCell.title = result.address;
 
-    // Historical balance cell
     const histCell = document.createElement('td');
     histCell.className = 'balance-cell';
     if (result.historicalBalance !== null) {
@@ -366,12 +372,10 @@ function displayResults(results) {
       histCell.title = result.error || '';
     }
 
-    // Current balance cell
     const currCell = document.createElement('td');
     currCell.className = 'balance-cell';
     currCell.textContent = formatBalance(result.currentBalance);
 
-    // PnL cell
     const pnlCell = document.createElement('td');
     if (result.pnl !== null) {
       pnlCell.textContent = formatPnl(result.pnl);
@@ -394,24 +398,20 @@ function displayResults(results) {
     resultsBody.appendChild(row);
   }
 
-  // Update summary
   totalWalletsSpan.textContent = results.length;
   totalPnlSpan.textContent = formatPnl(totalPnl) + ' SOL';
   totalPnlSpan.className = 'value ' + getPnlClass(totalPnl);
   winLossSpan.textContent = `${winners}/${losers}`;
 
-  // Show results
   resultsSection.classList.remove('hidden');
 
-  // Show error note if some failed
   if (errorCount > 0 && errorCount < results.length) {
     showError(`${errorCount} address(es) failed to fetch.`);
   } else if (errorCount === results.length) {
-    showError('Failed to fetch historical data. Try again in a moment.');
+    showError('Failed to fetch historical data.');
   }
 }
 
-// Utility functions
 function shortenAddress(address) {
   if (address.length <= 12) return address;
   return `${address.slice(0, 4)}...${address.slice(-4)}`;

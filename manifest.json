@@ -8,7 +8,7 @@
   ],
   "host_permissions": [
     "https://api.mainnet-beta.solana.com/*",
-    "https://pro-api.solscan.io/*"
+    "https://*.solana.com/*"
   ],
   "action": {
     "default_popup": "popup.html",
