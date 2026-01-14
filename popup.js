@@ -1,8 +1,12 @@
 // Solana PnL Tracker - Popup Script
+// Uses Solscan Pro API to get historical balance data
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const EIGHT_HOURS_MS = 8 * 60 * 60 * 1000;
+const EIGHT_HOURS_SEC = 8 * 60 * 60;
 const DEFAULT_RPC = 'https://api.mainnet-beta.solana.com';
+const SOLSCAN_API_BASE = 'https://pro-api.solscan.io/v2.0';
+const SOL_TOKEN = 'So11111111111111111111111111111111111111111';
 const MAX_ADDRESSES = 20;
 
 // DOM Elements
@@ -10,7 +14,7 @@ const addressesInput = document.getElementById('addresses');
 const checkBtn = document.getElementById('checkBtn');
 const clearBtn = document.getElementById('clearBtn');
 const rpcUrlInput = document.getElementById('rpcUrl');
-const heliusKeyInput = document.getElementById('heliusKey');
+const solscanKeyInput = document.getElementById('solscanKey');
 const saveSettingsBtn = document.getElementById('saveSettings');
 const loadingSection = document.getElementById('loading');
 const resultsSection = document.getElementById('results');
@@ -24,7 +28,7 @@ const winLossSpan = document.getElementById('winLoss');
 // State
 let settings = {
   rpcUrl: DEFAULT_RPC,
-  heliusKey: ''
+  solscanKey: ''
 };
 
 // Initialize
@@ -45,7 +49,7 @@ async function loadSettings() {
     if (stored.settings) {
       settings = { ...settings, ...stored.settings };
       rpcUrlInput.value = settings.rpcUrl || '';
-      heliusKeyInput.value = settings.heliusKey || '';
+      solscanKeyInput.value = settings.solscanKey || '';
     }
   } catch (e) {
     console.error('Failed to load settings:', e);
@@ -67,7 +71,7 @@ async function loadSavedAddresses() {
 // Save settings
 async function handleSaveSettings() {
   settings.rpcUrl = rpcUrlInput.value.trim() || DEFAULT_RPC;
-  settings.heliusKey = heliusKeyInput.value.trim();
+  settings.solscanKey = solscanKeyInput.value.trim();
 
   try {
     await chrome.storage.local.set({ settings });
@@ -90,6 +94,12 @@ function handleClear() {
 
 // Main check function
 async function handleCheck() {
+  // Check for API key first
+  if (!settings.solscanKey) {
+    showError('Solscan Pro API key required. Get one at solscan.io/apis and add it in Settings.');
+    return;
+  }
+
   const addressText = addressesInput.value.trim();
   if (!addressText) {
     showError('Please enter at least one Solana address');
@@ -153,56 +163,118 @@ function isValidSolanaAddress(address) {
 
 // Fetch balances for all addresses
 async function fetchAllBalances(addresses) {
-  const results = [];
-  const storedBalances = await getStoredBalances();
-  const now = Date.now();
-
-  // Batch RPC calls for current balances
+  // Get current balances in batch
   const currentBalances = await batchGetBalances(addresses);
 
-  for (let i = 0; i < addresses.length; i++) {
-    const address = addresses[i];
-    const currentBalance = currentBalances[i];
+  // Get historical data from Solscan for each address
+  const results = await Promise.all(
+    addresses.map(async (address, index) => {
+      const currentBalance = currentBalances[index];
 
-    // Get historical balance
-    let historicalBalance = null;
-    let historicalSource = 'stored';
-
-    // Check if we have a stored balance from ~8 hours ago
-    const stored = storedBalances[address];
-    if (stored && stored.length > 0) {
-      // Find the closest balance to 8 hours ago
-      const targetTime = now - EIGHT_HOURS_MS;
-      const closest = findClosestBalance(stored, targetTime);
-      if (closest) {
-        historicalBalance = closest.balance;
-        historicalSource = 'stored';
-      }
-    }
-
-    // If no stored historical balance, try Helius if available
-    if (historicalBalance === null && settings.heliusKey) {
       try {
-        historicalBalance = await getHeliusHistoricalBalance(address);
-        historicalSource = 'helius';
+        // Get SOL transfers from last 8 hours from Solscan
+        const netChange = await getSolscanNetChange(address);
+
+        // Historical balance = current balance - net change over 8 hours
+        // If net change is +5 SOL (received 5), then 8h ago was current - 5
+        // If net change is -3 SOL (sent 3), then 8h ago was current + 3
+        const historicalBalance = currentBalance - netChange;
+
+        return {
+          address,
+          currentBalance,
+          historicalBalance,
+          pnl: netChange // PnL is the net change
+        };
       } catch (e) {
-        console.warn('Helius historical fetch failed:', e);
+        console.error(`Failed to get history for ${address}:`, e);
+        return {
+          address,
+          currentBalance,
+          historicalBalance: null,
+          pnl: null,
+          error: e.message
+        };
       }
-    }
-
-    // Store current balance for future reference
-    await storeBalance(address, currentBalance, now);
-
-    results.push({
-      address,
-      currentBalance,
-      historicalBalance,
-      historicalSource,
-      pnl: historicalBalance !== null ? currentBalance - historicalBalance : null
-    });
-  }
+    })
+  );
 
   return results;
+}
+
+// Get net SOL change from Solscan API over the last 8 hours
+async function getSolscanNetChange(address) {
+  const now = Math.floor(Date.now() / 1000);
+  const eightHoursAgo = now - EIGHT_HOURS_SEC;
+
+  let allTransfers = [];
+  let page = 1;
+  const pageSize = 100;
+  let hasMore = true;
+
+  // Paginate through all transfers in the time range
+  while (hasMore) {
+    const url = new URL(`${SOLSCAN_API_BASE}/account/transfer`);
+    url.searchParams.set('address', address);
+    url.searchParams.set('token', SOL_TOKEN);
+    url.searchParams.set('from_time', eightHoursAgo.toString());
+    url.searchParams.set('to_time', now.toString());
+    url.searchParams.set('page', page.toString());
+    url.searchParams.set('page_size', pageSize.toString());
+
+    const response = await fetch(url.toString(), {
+      method: 'GET',
+      headers: {
+        'token': settings.solscanKey,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      if (response.status === 401) {
+        throw new Error('Invalid Solscan API key');
+      } else if (response.status === 429) {
+        throw new Error('Rate limited - try again later');
+      }
+      throw new Error(`Solscan API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    if (!data.success) {
+      throw new Error(data.message || 'Solscan API returned error');
+    }
+
+    const transfers = data.data || [];
+    allTransfers = allTransfers.concat(transfers);
+
+    // Check if there are more pages
+    if (transfers.length < pageSize) {
+      hasMore = false;
+    } else {
+      page++;
+      // Safety limit to prevent infinite loops
+      if (page > 10) {
+        hasMore = false;
+      }
+    }
+  }
+
+  // Calculate net change
+  // flow: "in" means received, "out" means sent
+  let netChange = 0;
+
+  for (const transfer of allTransfers) {
+    const amount = (transfer.amount || 0) / LAMPORTS_PER_SOL;
+
+    if (transfer.flow === 'in') {
+      netChange += amount;
+    } else if (transfer.flow === 'out') {
+      netChange -= amount;
+    }
+  }
+
+  return netChange;
 }
 
 // Batch get current balances using JSON-RPC batch
@@ -271,106 +343,6 @@ async function getSingleBalance(address) {
   }
 }
 
-// Get stored balances from chrome storage
-async function getStoredBalances() {
-  try {
-    const stored = await chrome.storage.local.get(['balanceHistory']);
-    return stored.balanceHistory || {};
-  } catch (e) {
-    console.error('Failed to get stored balances:', e);
-    return {};
-  }
-}
-
-// Store a balance
-async function storeBalance(address, balance, timestamp) {
-  try {
-    const stored = await chrome.storage.local.get(['balanceHistory']);
-    const history = stored.balanceHistory || {};
-
-    if (!history[address]) {
-      history[address] = [];
-    }
-
-    // Add new entry
-    history[address].push({ balance, timestamp });
-
-    // Keep only entries from the last 24 hours
-    const cutoff = Date.now() - (24 * 60 * 60 * 1000);
-    history[address] = history[address].filter(e => e.timestamp > cutoff);
-
-    // Limit to 50 entries per address
-    if (history[address].length > 50) {
-      history[address] = history[address].slice(-50);
-    }
-
-    await chrome.storage.local.set({ balanceHistory: history });
-  } catch (e) {
-    console.error('Failed to store balance:', e);
-  }
-}
-
-// Find closest balance to target time
-function findClosestBalance(entries, targetTime) {
-  if (!entries || entries.length === 0) return null;
-
-  // Find entry closest to 8 hours ago (within 2 hour window)
-  const minTime = targetTime - (2 * 60 * 60 * 1000); // 6 hours ago
-  const maxTime = targetTime + (2 * 60 * 60 * 1000); // 10 hours ago
-
-  let closest = null;
-  let closestDiff = Infinity;
-
-  for (const entry of entries) {
-    if (entry.timestamp >= minTime && entry.timestamp <= maxTime) {
-      const diff = Math.abs(entry.timestamp - targetTime);
-      if (diff < closestDiff) {
-        closestDiff = diff;
-        closest = entry;
-      }
-    }
-  }
-
-  // If no entry within window, use oldest entry if it's older than 6 hours
-  if (!closest) {
-    const oldest = entries[0];
-    if (oldest && oldest.timestamp < (Date.now() - (6 * 60 * 60 * 1000))) {
-      return oldest;
-    }
-  }
-
-  return closest;
-}
-
-// Get historical balance from Helius (if API key available)
-async function getHeliusHistoricalBalance(address) {
-  if (!settings.heliusKey) return null;
-
-  // Calculate timestamp for 8 hours ago
-  const eightHoursAgo = new Date(Date.now() - EIGHT_HOURS_MS);
-
-  try {
-    // Use Helius getBalances endpoint with time context
-    const response = await fetch(`https://api.helius.xyz/v0/addresses/${address}/balances?api-key=${settings.heliusKey}`);
-
-    if (!response.ok) {
-      throw new Error(`Helius API error: ${response.status}`);
-    }
-
-    const data = await response.json();
-
-    // Find native SOL balance
-    if (data.nativeBalance !== undefined) {
-      return data.nativeBalance / LAMPORTS_PER_SOL;
-    }
-
-    return null;
-  } catch (e) {
-    console.warn('Helius fetch failed:', e);
-    return null;
-  }
-}
-
 // Display results in table
 function displayResults(results) {
   resultsBody.innerHTML = '';
@@ -379,6 +351,7 @@ function displayResults(results) {
   let winners = 0;
   let losers = 0;
   let validPnlCount = 0;
+  let errorCount = 0;
 
   for (const result of results) {
     const row = document.createElement('tr');
@@ -395,8 +368,9 @@ function displayResults(results) {
     if (result.historicalBalance !== null) {
       histCell.textContent = formatBalance(result.historicalBalance);
     } else {
-      histCell.textContent = 'N/A';
-      histCell.style.color = '#555';
+      histCell.textContent = result.error ? 'Error' : 'N/A';
+      histCell.style.color = '#ff6b6b';
+      histCell.title = result.error || '';
     }
 
     // Current balance cell
@@ -417,6 +391,7 @@ function displayResults(results) {
     } else {
       pnlCell.textContent = '-';
       pnlCell.className = 'pnl-neutral';
+      errorCount++;
     }
 
     row.appendChild(addrCell);
@@ -435,9 +410,11 @@ function displayResults(results) {
   // Show results
   resultsSection.classList.remove('hidden');
 
-  // Show note if no historical data
-  if (validPnlCount === 0) {
-    showError('No historical data available yet. Check again in 8 hours to see PnL comparison. Your current balances have been recorded.');
+  // Show error note if some failed
+  if (errorCount > 0 && errorCount < results.length) {
+    showError(`${errorCount} address(es) failed to fetch historical data. Check the API key or try again.`);
+  } else if (errorCount === results.length) {
+    showError('Failed to fetch historical data for all addresses. Check your Solscan API key.');
   }
 }
 
@@ -449,6 +426,7 @@ function shortenAddress(address) {
 
 function formatBalance(balance) {
   if (balance === 0) return '0';
+  if (balance < 0) return formatBalance(Math.abs(balance)) + ' (neg)';
   if (balance < 0.0001) return '<0.0001';
   if (balance < 1) return balance.toFixed(4);
   if (balance < 100) return balance.toFixed(3);

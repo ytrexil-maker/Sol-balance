@@ -1,16 +1,21 @@
 # Solana PnL Tracker - Edge Extension
 
-A Microsoft Edge browser extension that tracks profit/loss for Solana wallets by comparing current balance vs 8 hours ago.
+A Microsoft Edge browser extension that tracks profit/loss for Solana wallets by comparing current balance vs 8 hours ago using the Solscan Pro API.
 
 ## Features
 
 - Paste up to 20 Solana wallet addresses
 - View current SOL balance for each wallet
-- Compare against balance from 8 hours ago
+- Compare against balance from 8 hours ago (via Solscan API)
 - See profit/loss in SOL
 - Summary stats: total wallets, total PnL, winners/losers count
-- Stores balance history locally for comparison
-- Optional Helius API integration for enhanced historical data
+- Real-time historical data from Solscan Pro API
+
+## Requirements
+
+**Solscan Pro API Key** - Required to fetch historical balance data.
+- Get your API key at [solscan.io/apis](https://solscan.io/apis)
+- Free tier available with rate limits
 
 ## Installation
 
@@ -23,6 +28,13 @@ A Microsoft Edge browser extension that tracks profit/loss for Solana wallets by
 5. Select the folder containing this extension
 6. The extension icon should appear in your toolbar
 
+## Setup
+
+1. Click the extension icon
+2. Expand **Settings**
+3. Enter your Solscan Pro API key
+4. Click **Save Settings**
+
 ## Usage
 
 1. Click the extension icon in your toolbar
@@ -34,52 +46,54 @@ A Microsoft Edge browser extension that tracks profit/loss for Solana wallets by
    - Current balance
    - Profit/Loss
 
-### First Time Usage Note
-
-The extension stores balance snapshots when you check addresses. On your first check, there won't be historical data available yet - the "8h Ago" column will show "N/A".
-
-Check your addresses again after 8+ hours to see the actual PnL comparison.
-
-## Settings
-
-Click **Settings** to configure:
-
-- **RPC Endpoint**: Custom Solana RPC URL (defaults to public mainnet)
-- **Helius API Key**: Optional - provides better historical data
-
 ## How It Works
 
 1. **Current Balance**: Fetched in real-time from Solana RPC
-2. **Historical Balance**: Stored locally when you check addresses. The extension looks for a stored balance from approximately 8 hours ago (with a 2-hour tolerance window)
-3. **PnL Calculation**: Simply `Current Balance - Historical Balance`
+2. **Historical Balance**: Calculated using Solscan Pro API's transfer endpoint:
+   - Fetches all SOL transfers from the last 8 hours
+   - Calculates net change (inflows - outflows)
+   - Historical balance = Current balance - Net change
+3. **PnL**: The net change in SOL over 8 hours
 
 ## Technical Details
 
 - Built with Manifest V3 for Edge compatibility
-- Uses batch RPC calls for efficient balance fetching
-- Stores up to 24 hours of balance history per address
-- Automatically cleans up old data via background worker
-- No external servers - all data stored locally
+- Uses Solscan Pro API for historical transfer data
+- Uses batch RPC calls for efficient current balance fetching
+- Paginates through Solscan API results automatically
+- Settings stored locally via chrome.storage
 
 ## Files
 
 ```
 ├── manifest.json      # Extension configuration
 ├── popup.html         # Main UI
-├── popup.js          # Core logic
-├── styles.css        # Styling
-├── background.js     # Background service worker
-└── icons/            # Extension icons
+├── popup.js           # Core logic (Solscan API integration)
+├── styles.css         # Styling
+├── background.js      # Background service worker
+└── icons/             # Extension icons
     ├── icon16.png
     ├── icon48.png
     └── icon128.png
 ```
 
+## API Endpoints Used
+
+- **Solana RPC**: `getBalance` for current SOL balance
+- **Solscan Pro API**: `/v2.0/account/transfer` for SOL transfer history
+
 ## Permissions
 
-- `storage`: To save balance history and settings locally
-- `https://api.mainnet-beta.solana.com/*`: To fetch SOL balances
-- `https://api.helius.xyz/*`: Optional, for enhanced historical data
+- `storage`: To save API key and settings locally
+- `https://api.mainnet-beta.solana.com/*`: To fetch current SOL balances
+- `https://pro-api.solscan.io/*`: To fetch historical transfer data
+
+## Rate Limits
+
+Solscan Pro API has rate limits based on your plan. If you hit rate limits:
+- Reduce the number of addresses per check
+- Wait between checks
+- Consider upgrading your Solscan API plan
 
 ## License
 
